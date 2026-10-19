@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ricochet Infinity — Native macOS Edition</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Control Bar -->
+    <header class="top-bar" role="banner">
+      <div class="brand-group">
+        <img src="assets/sprites/Resources/Interface/Upsell/RI Logo.png" alt="Ricochet Infinity" class="brand-logo" />
+        <div class="brand-meta">
+          <span class="brand-title">RICOCHET INFINITY</span>
+          <span class="brand-subtitle" id="status-subtitle">macOS Native Engine · 378 Retail Rounds · 1,275 Decoded Sprites</span>
+        </div>
+      </div>
+
+      <nav class="toolbar-actions" aria-label="Game Controls">
+        <button type="button" class="nav-btn" id="btn-prev-round" title="Previous Round ([)">◀ Prev</button>
+        <span class="round-pill" id="round-indicator">Planet 1 · Round 1/14</span>
+        <button type="button" class="nav-btn" id="btn-next-round" title="Next Round (])">Next ▶</button>
+
+        <button type="button" class="nav-btn primary-btn" commandfor="planets-dialog" command="show-modal" id="btn-open-planets">
+          🪐 Planets &amp; Campaigns (378)
+        </button>
+        <button type="button" class="nav-btn" commandfor="hangar-dialog" command="show-modal" id="btn-open-hangar">
+          🚀 Ship &amp; Ball Hangar (27)
+        </button>
+        <button type="button" class="nav-btn" commandfor="inspector-dialog" command="show-modal" id="btn-open-inspector">
+          🔬 Binary RE &amp; Assets
+        </button>
+        <button type="button" class="nav-btn" id="btn-toggle-audio" aria-pressed="true">
+          🔊 Audio: ON
+        </button>
+        <button type="button" class="nav-btn" id="btn-pause" aria-pressed="false">
+          ⏸ Pause (P)
+        </button>
+      </nav>
+    </header>
+
+    <!-- Main 800x600 Retail Playfield + HUD Canvas Stage -->
+    <main class="stage-container">
+      <div class="canvas-wrapper" id="canvas-wrapper">
+        <canvas id="game-canvas" width="800" height="600" aria-label="Ricochet Infinity Playfield"></canvas>
+
+        <!-- Level Intro / Victory Banner Overlay -->
+        <div class="level-banner" id="level-banner" hidden>
+          <div class="banner-tag" id="banner-planet">RICOCHET STATION</div>
+          <h2 class="banner-title" id="banner-title">Dance Till You Drop</h2>
+          <p class="banner-sub" id="banner-sub">Left-Click or Space to Launch Ion Sphere · Right-Click / Hold Space for Ion Recall</p>
+        </div>
+      </div>
+
+      <!-- Bottom Quick Power-Up & Telemetry Strip -->
+      <footer class="telemetry-bar">
+        <div class="controls-hint">
+          <span><kbd>Mouse</kbd> / <kbd>←</kbd><kbd>→</kbd> Move Ship</span>
+          <span><kbd>Left-Click</kbd> Launch / Fire Weapon</span>
+          <span><kbd>Right-Click</kbd> or <kbd>Space</kbd> <strong>Ion Sphere Recall</strong> (Tractor Curve)</span>
+          <span><kbd>[</kbd> <kbd>]</kbd> Skip Round</span>
+        </div>
+        <div class="powerup-spawner">
+          <span class="spawner-label">Test Power-Up:</span>
+          <button type="button" class="pu-chip" data-pu="Fire Ball">🔥 Fire Ball</button>
+          <button type="button" class="pu-chip" data-pu="Multiply 3">⚡ Multi-3</button>
+          <button type="button" class="pu-chip" data-pu="Stinger Missile Launcher">🚀 Stinger Missiles</button>
+          <button type="button" class="pu-chip" data-pu="Lightning Ball">🌩 Lightning</button>
+          <button type="button" class="pu-chip" data-pu="Acid Ball">🧪 Acid Ball</button>
+          <button type="button" class="pu-chip" data-pu="Rail Ball">💠 Rail Ball</button>
+          <button type="button" class="pu-chip" data-pu="Gun">🔫 Laser Gun</button>
+          <button type="button" class="pu-chip" data-pu="Expand Paddle">🛡 Expand</button>
+          <button type="button" class="pu-chip" data-pu="Sight">🎯 Sight Laser</button>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Planets & Level Packs Modal Dialog -->
+  <dialog id="planets-dialog" closedby="any" aria-labelledby="planets-dialog-title" class="game-dialog">
+    <div class="dialog-header">
+      <h2 id="planets-dialog-title">🪐 Select Planet, Campaign, or Level Pack (378 Retail Rounds)</h2>
+      <button type="button" class="dialog-close" commandfor="planets-dialog" command="close">✕ Close</button>
+    </div>
+    <div class="dialog-body">
+      <div class="campaign-tabs" role="tablist">
+        <button type="button" class="tab-btn active" data-tab="main-quest">Main Tournament (9 Planets)</button>
+        <button type="button" class="tab-btn" data-tab="ep2-quest">Delta Quadrant Add-On (5 Planets)</button>
+        <button type="button" class="tab-btn" data-tab="all-packs">All 38 Retail Level Packs &amp; Showcases</button>
+      </div>
+      <div id="planets-grid" class="planets-grid"></div>
+      <div id="rounds-list-panel" class="rounds-list-panel"></div>
+    </div>
+  </dialog>
+
+  <!-- Ship & Ion Sphere Hangar Modal Dialog -->
+  <dialog id="hangar-dialog" closedby="any" aria-labelledby="hangar-dialog-title" class="game-dialog">
+    <div class="dialog-header">
+      <h2 id="hangar-dialog-title">🚀 Player Ship &amp; Ion Sphere Hangar (All 27 Retail Ships &amp; 14 Balls Unlocked)</h2>
+      <button type="button" class="dialog-close" commandfor="hangar-dialog" command="close">✕ Close</button>
+    </div>
+    <div class="dialog-body">
+      <h3 class="section-heading">Select Player Ship (27 Retail Ships with 21-Frame Banking Sprites)</h3>
+      <div id="ships-grid" class="hangar-grid"></div>
+      <h3 class="section-heading">Select Ion Sphere (14 Retail Balls)</h3>
+      <div id="balls-grid" class="hangar-grid balls-grid"></div>
+    </div>
+  </dialog>
+
+  <!-- Reverse Engineering & Binary Asset Inspector Modal Dialog -->
+  <dialog id="inspector-dialog" closedby="any" aria-labelledby="inspector-dialog-title" class="game-dialog">
+    <div class="dialog-header">
+      <h2 id="inspector-dialog-title">🔬 Reverse Engineering Dossier &amp; Asset Inspector</h2>
+      <button type="button" class="dialog-close" commandfor="inspector-dialog" command="close">✕ Close</button>
+    </div>
+    <div class="dialog-body inspector-body">
+      <div class="re-summary-cards">
+        <div class="re-card">
+          <h4>Outer Wrapper (`ricochet-infinity-.exe`)</h4>
+          <p>Reflexive Arcade <code>ZipLite</code> self-extractor (37.57 MB). Contains <code>RicochetInfinitySetup.exe</code> @ <code>0x2b804</code> (37,339,989 B), <code>splash.jpg</code>, <code>settings.txt</code>, and <code>channel.dat</code>.</p>
+        </div>
+        <div class="re-card">
+          <h4>Inner Installer (`Inno Setup 5.2.3`)</h4>
+          <p>Solid LZMA stream @ <code>0xd000</code> with 64 KiB block-aligned x86 <code>E8</code>/<code>E9</code> relative-call filter. All 89 files unpacked and 100% MD5-verified.</p>
+        </div>
+        <div class="re-card">
+          <h4>Game Engine DLL (`Data3.bin`)</h4>
+          <p>3.81 MB unpacked PE32 i386 DLL (`0x10001000..0x104bd802`) with <strong>836 C++ RTTI classes</strong> (`CSequence`, `CFrame`, `CBrickLayout`, `CBrickPlugInOrbit`, etc.).</p>
+        </div>
+        <div class="re-card">
+          <h4>Asset Container (`data.dat`) &amp; Codecs</h4>
+          <p>67 MB ZIP with modified <code>RE\x05\x06</code> EOCD signature (2,466 files). <code>.Frame</code>/<code>.Sequence</code> decoded via <code>Data3.bin @ 0x10151d00</code> (Mode 0 JPEG + prefix-sum 8-bit alpha; Mode 1 4-plane prefix-sum RGBA).</p>
+        </div>
+      </div>
+
+      <div class="inspector-controls">
+        <input type="search" id="sprite-search" placeholder="Search 1,275 decoded retail sprites (e.g. Alien Vista, Ship, Coin, Power Ups)..." class="search-input" />
+        <span id="sprite-count-label" class="count-badge">1,275 Sprites</span>
+      </div>
+      <div id="sprite-browser-grid" class="sprite-browser-grid"></div>
+    </div>
+  </dialog>
+
+  <script type="module" src="engine.js"></script>
+</body>
+</html>

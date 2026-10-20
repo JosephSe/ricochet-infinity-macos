@@ -16,7 +16,7 @@ Game lovers can download the **single-file macOS Disk Image (`.dmg`)** or **sing
    > xattr -cr "/Applications/Ricochet Infinity.app"
    > ```
 
-Everything (all **1,275 decoded RGBA sprites**, **378 retail rounds**, **27 player ships**, **14 Ion Spheres**, **33 power-ups**, and **227 audio tracks**) is embedded inside `Ricochet Infinity.app`—no Python, external server, or internet connection required.
+Everything (all **1,274 decoded RGBA sprites**, **378 retail rounds**, **27 player ships**, **14 Ion Spheres**, **33 power-ups**, and **228 audio tracks**) is embedded inside `Ricochet Infinity.app`—no Python, external server, or internet connection required.
 
 ---
 
@@ -34,9 +34,10 @@ Everything (all **1,275 decoded RGBA sprites**, **378 retail rounds**, **27 play
 - **38 Retail Level Packs (378 Rounds Total):**
   - **Main Tournament (9 Planets, 146 Rounds):** *Ricochet Station*, *Barrakis*, *New Venus*, *Terminous*, *Hyperior*, *Harlequin's World*, *Vulcan's Forge*, *Deviation*, *Rings Of Olympius*.
   - **Episode 2 — Delta Quadrant Add-On (5 Planets, 70 Rounds):** *Yucatan*, *Old Capricana*, *Harlequin's Comet*, *Beeblebraxis*, *Trantora*.
-  - **Showcase & Bonus Packs (162 Rounds):** *Examples* (`139` rounds) + `23` Main Menu animated brick showcase patterns.
+  - **Showcase & Bonus Packs (162 Rounds):** *Examples* (`139` rounds) + `22` Main Menu animated brick showcase patterns + `1` template round.
 - **All 27 Retail Ships & 14 Ion Spheres Unlocked** in the **Ship & Ball Hangar**.
-- **Real-Time `CBrickPlugIn` Motion Engine:** Executes `CBrickPlugInSimultaneous`, `CBrickPlugInSequence`, `CBrickPlugInOrbit`, `CBrickPlugInMoveToPoint`, `CBrickPlugInMoveBetweenPoints`, `CBrickPlugInMimicMovement`, `CBrickPlugInBlendPositions`, `CBrickPlugInMoveAlongPath`, `CBrickPlugInSpring`, `CBrickPlugInWaitXSeconds`, `CBrickPlugInWaitForBrickToBeDestroyed`, and `CBrickPlugInDestroySelf`.
+- **Real-Time `CBrickPlugIn` Motion Engine:** Executes `CBrickPlugInSimultaneous`, `CBrickPlugInSequence`, `CBrickPlugInOrbit`, `CBrickPlugInMoveToPoint`, `CBrickPlugInMoveBetweenPoints`, `CBrickPlugInMimicMovement`, `CBrickPlugInBlendPositions`, `CBrickPlugInMoveAlongPath`, `CBrickPlugInSpring`, `CBrickPlugInWaitXSeconds`, `CBrickPlugInWaitForBrickToBeDestroyed`, and `CBrickPlugInDestroySelf` (plus `WaitForMessage`, `Hide`, `Reveal`, `DeleteSelf`, `FastForward`, and `RandomOrderSequence`). Scripts with `When Done = Stop` end after their last step; all others loop.
+  - **Not yet implemented** (these plug-ins complete immediately and are skipped): `If`, `StateMachine`, `WaitForExpression`, `CreateBricks`, `ChangeBrick`, `DropPowerup`, `MoveInDirection`, `MoveAwayFromPointAtConstantSpeed`, `FireProjectile`, `TriggerAction*`, and the `Print*` text plug-ins. `Ease InOut` percentages are not honoured (all eased moves use a full smoothstep).
 
 ---
 
@@ -54,6 +55,13 @@ This project was reverse engineered from the original Windows installer (`ricoch
 ## 🛠 Building from Source
 
 ```zsh
+# One-time: Python dependencies for the build tools
+python3 -m pip install numpy pillow
+
+# Re-decode all sprites, rounds and manifests from the extracted retail assets
+# (requires the untracked extracted/ folder produced by the steps above)
+python3 tools/build_assets.py
+
 # Rebuild Universal 2 macOS App Bundle + Single-File .dmg & .zip
 python3 tools/build_macos_app.py
 

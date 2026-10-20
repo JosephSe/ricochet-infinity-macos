@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-ROOT = Path("/Users/josephwork/Documents/antigravity/dazzling-euclid")
+ROOT = Path(__file__).resolve().parent.parent
 EXTRACTED_ASSETS = ROOT / "extracted" / "assets"
 EXTRACTED_GAME = ROOT / "extracted" / "game"
 OUT_DIR = ROOT / "public" / "assets"
@@ -592,7 +592,7 @@ def copy_audio_and_fonts() -> dict[str, Any]:
         if fn.lower().endswith(".ttf"):
             shutil.copy2(fonts_src / fn, fonts_dst / fn)
 
-    print(f"[build_assets] Copied audio ({len(audio_manifest)//3} files) and TTF fonts.")
+    print(f"[build_assets] Copied audio ({len(set(audio_manifest.values()))} files) and TTF fonts.")
     return audio_manifest
 
 

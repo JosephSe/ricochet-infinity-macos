@@ -1,6 +1,5 @@
 import Cocoa
 import WebKit
-import UniformTypeIdentifiers
 
 class LocalAssetSchemeHandler: NSObject, WKURLSchemeHandler {
     let publicDir: URL
@@ -24,8 +23,14 @@ class LocalAssetSchemeHandler: NSObject, WKURLSchemeHandler {
             relPath = "index.html"
         }
 
-        let fileURL = publicDir.appendingPathComponent(relPath)
-        guard let data = try? Data(contentsOf: fileURL) else {
+        // url.path is percent-decoded, so "%2e%2e/" would otherwise escape the bundle's public folder.
+        let root = publicDir.standardizedFileURL
+        let fileURL = root.appendingPathComponent(relPath).standardizedFileURL
+        guard fileURL.path.hasPrefix(root.path + "/") else {
+            urlSchemeTask.didFailWithError(URLError(.noPermissionsToReadFile))
+            return
+        }
+        guard let fullData = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
             urlSchemeTask.didFailWithError(URLError(.fileDoesNotExist))
             return
         }
@@ -46,16 +51,26 @@ class LocalAssetSchemeHandler: NSObject, WKURLSchemeHandler {
         default:     mimeType = "application/octet-stream"
         }
 
-        let headers: [String: String] = [
+        var headers: [String: String] = [
             "Content-Type": mimeType,
-            "Content-Length": "\(data.count)",
-            "Access-Control-Allow-Origin": "*",
+            "Accept-Ranges": "bytes",
             "Cache-Control": "no-cache"
         ]
 
+        // <audio> playback in WebKit issues byte-range requests; answer them with 206 Partial Content.
+        var data = fullData
+        var statusCode = 200
+        if let rangeHeader = urlSchemeTask.request.value(forHTTPHeaderField: "Range"),
+           let range = LocalAssetSchemeHandler.parseByteRange(rangeHeader, length: fullData.count) {
+            data = fullData.subdata(in: range.lowerBound..<(range.upperBound + 1))
+            statusCode = 206
+            headers["Content-Range"] = "bytes \(range.lowerBound)-\(range.upperBound)/\(fullData.count)"
+        }
+        headers["Content-Length"] = "\(data.count)"
+
         if let response = HTTPURLResponse(
             url: url,
-            statusCode: 200,
+            statusCode: statusCode,
             httpVersion: "HTTP/1.1",
             headerFields: headers
         ) {
@@ -65,6 +80,24 @@ class LocalAssetSchemeHandler: NSObject, WKURLSchemeHandler {
         } else {
             urlSchemeTask.didFailWithError(URLError(.cannotParseResponse))
         }
+    }
+
+    /// Parses a single `bytes=start-end` / `bytes=start-` / `bytes=-suffix` range into inclusive byte offsets.
+    static func parseByteRange(_ header: String, length: Int) -> ClosedRange<Int>? {
+        guard length > 0, header.hasPrefix("bytes=") else { return nil }
+        let spec = header.dropFirst("bytes=".count)
+        guard !spec.contains(","), let dash = spec.firstIndex(of: "-") else { return nil }
+        let startStr = spec[spec.startIndex..<dash]
+        let endStr = spec[spec.index(after: dash)...]
+
+        if startStr.isEmpty {
+            guard let suffix = Int(endStr), suffix > 0 else { return nil }
+            return max(0, length - suffix)...(length - 1)
+        }
+        guard let start = Int(startStr), start < length else { return nil }
+        let end = endStr.isEmpty ? length - 1 : min(Int(endStr) ?? (length - 1), length - 1)
+        guard end >= start else { return nil }
+        return start...end
     }
 
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
@@ -78,6 +111,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .darkAqua)
+        buildMainMenu()
 
         let bundleURL = Bundle.main.bundleURL
         let workspaceDir = bundleURL.deletingLastPathComponent()
@@ -110,7 +144,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         webView = WKWebView(frame: rect, configuration: config)
         webView.autoresizingMask = [.width, .height]
-        webView.setValue(false, forKey: "drawsBackground")
+        if #available(macOS 12.0, *) {
+            webView.underPageBackgroundColor = window.backgroundColor
+        }
         window.contentView = webView
 
         window.makeKeyAndOrderFront(nil)
@@ -119,6 +155,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let startURL = URL(string: "ricochet://app/index.html") {
             webView.load(URLRequest(url: startURL))
         }
+    }
+
+    private func buildMainMenu() {
+        let appName = "Ricochet Infinity"
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu(title: appName)
+        appMenu.addItem(withTitle: "About \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide \(appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        let fullScreen = windowMenu.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.command, .control]
+        windowMenu.addItem(.separator())
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

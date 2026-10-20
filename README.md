@@ -32,11 +32,11 @@ Everything (all **1,275 decoded RGBA sprites**, **378 retail rounds**, **27 play
 
 ### Included Content
 - **38 Retail Level Packs (378 Rounds Total):**
-  - **Main Tournament (9 Planets, 146 Rounds):** *Ricochet Station*, *Barrakis*, *Marishka*, *Risa*, *frozen*, *Klendathu*, *Mustafar*, *Tatooine*, *Infinity*.
-  - **Episode 2 — Delta Quadrant Add-On (5 Planets, 70 Rounds):** *Yucatan*, *Old Capricana*, *Alpha Centauri*, *Ceti Alpha V*, *zorgon*.
+  - **Main Tournament (9 Planets, 146 Rounds):** *Ricochet Station*, *Barrakis*, *New Venus*, *Terminous*, *Hyperior*, *Harlequin's World*, *Vulcan's Forge*, *Deviation*, *Rings Of Olympius*.
+  - **Episode 2 — Delta Quadrant Add-On (5 Planets, 70 Rounds):** *Yucatan*, *Old Capricana*, *Harlequin's Comet*, *Beeblebraxis*, *Trantora*.
   - **Showcase & Bonus Packs (162 Rounds):** *Examples* (`139` rounds) + `23` Main Menu animated brick showcase patterns.
 - **All 27 Retail Ships & 14 Ion Spheres Unlocked** in the **Ship & Ball Hangar**.
-- **Real-Time `CBrickPlugIn` Motion Engine:** Executes `CBrickPlugInSimultaneous`, `CBrickPlugInSequence`, `CBrickPlugInOrbit`, `CBrickPlugInMoveToPoint`, `CBrickPlugInSpring`, `CBrickPlugInWaitXSeconds`, `CBrickPlugInWaitForBrickToBeDestroyed`, and `CBrickPlugInDestroySelf`.
+- **Real-Time `CBrickPlugIn` Motion Engine:** Executes `CBrickPlugInSimultaneous`, `CBrickPlugInSequence`, `CBrickPlugInOrbit`, `CBrickPlugInMoveToPoint`, `CBrickPlugInMoveBetweenPoints`, `CBrickPlugInMimicMovement`, `CBrickPlugInBlendPositions`, `CBrickPlugInMoveAlongPath`, `CBrickPlugInSpring`, `CBrickPlugInWaitXSeconds`, `CBrickPlugInWaitForBrickToBeDestroyed`, and `CBrickPlugInDestroySelf`.
 
 ---
 
@@ -45,9 +45,9 @@ Everything (all **1,275 decoded RGBA sprites**, **378 retail rounds**, **27 play
 This project was reverse engineered from the original Windows installer (`ricochet-infinity-.exe`, SHA-256 `f120c914092a6c420eceb406ba9d3c06beeb4a092e6eb52c616d24ae323789b3`):
 
 1. **Outer Wrapper (`ZipLite`):** Carved out `RicochetInfinitySetup.exe` at offset `0x2b804` (`37,339,989` bytes).
-2. **Inner Installer (`Inno Setup 5.2.3`):** Decompressed the solid LZMA stream at `0xd000` (`tools/unpack_inno.py`), reversed the 64 KiB block-aligned x86 `E8`/`E9` `CallInstructionFilter`, and verified all **89 files** against their embedded MD5 hashes.
+2. **Inner Installer (`Inno Setup 5.2.3`):** Decompressed the solid LZMA stream at `0xd000`, reversed the 64 KiB block-aligned x86 `E8`/`E9` `CallInstructionFilter`, and verified all **89 files** against their embedded MD5 hashes.
 3. **Asset Archive (`data.dat`):** Restored the altered End-of-Central-Directory signature (`RE\x05\x06` → `PK\x05\x06`) to extract all **2,466 game assets**.
-4. **Game Engine DLL (`Data3.bin`):** Disassembled the 3.81 MB x86 PE32 engine DLL (`836` C++ RTTI classes) at `0x10163850` (`CSequence_ReadCustomPropBin`), `0x10151cc0` (`CFrame` dual-mode image decoder), and `0x1014ed00` (delta prefix-sum alpha/planar RGBA reconstruction) to decode all **1,275 `.Frame` and `.Sequence` files** (`tools/build_assets.py`).
+4. **Game Engine DLL (`Data3.bin`):** Disassembled the 3.81 MB x86 PE32 engine DLL (`836` C++ RTTI classes) at `0x10163850` (`CSequence_ReadCustomPropBin`), `0x10151cc0` (`CFrame` dual-mode image decoder), and `0x1014ed00` (delta prefix-sum alpha/planar RGBA reconstruction) to decode all **1,274 `.Frame` and `.Sequence` files** (`tools/build_assets.py`).
 
 ---
 

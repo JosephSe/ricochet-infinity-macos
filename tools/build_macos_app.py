@@ -17,7 +17,7 @@ DIST_DIR = ROOT / 'dist'
 
 
 def build_icns():
-    ico_path = ROOT / 'extracted' / 'game' / 'app' / 'RAW_001_Ricochet.ico'
+    ico_path = ROOT / 'extracted' / 'game' / 'ReflexiveArcade' / 'Icon_3.ico'
     logo_path = ROOT / 'public' / 'assets' / 'sprites' / 'Resources' / 'Interface' / 'Upsell' / 'RI Logo.png'
     iconset_dir = ROOT / 'macos' / 'AppIcon.iconset'
     if iconset_dir.exists():

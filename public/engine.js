@@ -1,5 +1,5 @@
 // Ricochet Infinity — Native macOS HTML5/Canvas Engine
-// Drives all 1,275 decoded .Frame/.Sequence sprites, 378 retail rounds, 27 ships, 33 power-ups, and 227 OGG audio tracks.
+// Drives all 1,274 decoded .Frame/.Sequence sprites, 378 retail rounds, 27 ships, 33 power-ups, and 228 OGG audio tracks.
 
 // 1. Invoker Commands API Feature Detection (per modern-web-guidance)
 if (!('commandForElement' in HTMLButtonElement.prototype)) {
@@ -21,16 +21,20 @@ if (!('commandForElement' in HTMLButtonElement.prototype)) {
   });
 }
 
-// Playfield geometry inside the 800x600 Score Board Frame
+// Playfield geometry inside the 800x600 Score Board Frame:
+// Transparent window in Score Board Frame.png is x: 12..626 (w=614), y: 12..599 (h=587).
+// Brick coordinates (0,0) in .Round files correspond to the top-left grid slot, whose center is (+22, +13).
 const PLAYFIELD = {
-  left: 14,
-  top: 14,
+  left: 12,
+  top: 12,
   right: 626,
-  bottom: 586,
-  width: 612,
-  height: 572,
-  centerX: 320,
-  centerY: 300,
+  bottom: 596,
+  width: 614,
+  height: 584,
+  originX: 34, // 12 + 22 (half standard 44px brick width)
+  originY: 25, // 12 + 13 (half standard 26px brick height)
+  centerX: 319,
+  centerY: 304,
 };
 
 function normalizeResKey(raw) {
@@ -46,6 +50,17 @@ function asArray(val) {
   return Array.isArray(val) ? val : [val];
 }
 
+function parsePair(str) {
+  if (typeof str !== 'string') return [0, 0];
+  const parts = str.split(',').map((s) => Number(s.trim()));
+  return [parts[0] || 0, parts[1] || 0];
+}
+
+function safeAssetUrl(url) {
+  if (!url) return '';
+  return encodeURI(url).replace(/#/g, '%23');
+}
+
 class SpriteManager {
   constructor(manifest) {
     this.manifest = manifest || {};
@@ -59,7 +74,6 @@ class SpriteManager {
     if (this.manifest[norm]) return norm;
     const lower = norm.toLowerCase();
     if (this.manifest[lower]) return this.manifest[lower].key || lower;
-    // Try Bricks/ prefix if style path omitted it
     if (this.manifest['bricks/' + lower]) return this.manifest['bricks/' + lower].key;
     if (this.manifest['power ups/' + lower]) return this.manifest['power ups/' + lower].key;
     return null;
@@ -78,7 +92,7 @@ class SpriteManager {
     if (!this.loading.has(key)) {
       const img = new Image();
       img.decoding = 'async';
-      img.src = meta.url;
+      img.src = safeAssetUrl(meta.url);
       img.onload = () => {
         this.images.set(key, img);
       };
@@ -128,8 +142,18 @@ class SpriteManager {
         ctx.restore();
         return false;
       }
-      const dx = options.topLeft ? 0 : (typeof f.ox === 'number' ? f.ox : -Math.floor(f.w / 2));
-      const dy = options.topLeft ? 0 : (typeof f.oy === 'number' ? f.oy : -Math.floor(f.h / 2));
+      let dx;
+      let dy;
+      if (options.topLeft) {
+        dx = 0;
+        dy = 0;
+      } else if (options.center) {
+        dx = -Math.floor(f.w / 2);
+        dy = -Math.floor(f.h / 2);
+      } else {
+        dx = typeof f.ox === 'number' ? f.ox : -Math.floor(f.w / 2);
+        dy = typeof f.oy === 'number' ? f.oy : -Math.floor(f.h / 2);
+      }
       ctx.drawImage(img, f.x, f.y, f.w, f.h, dx, dy, f.w, f.h);
     } else {
       const w = meta.sheetW || img.naturalWidth;
@@ -160,13 +184,13 @@ class AudioManager {
       .replace(/^Resources\/(Sounds|Music)\//i, '')
       .replace(/\.(Sound|ogg|wav)$/i, '')
       .trim();
-    return (
+    const found =
       this.manifest[clean] ||
       this.manifest[clean.toLowerCase()] ||
       this.manifest['Music/' + clean] ||
       this.manifest['music/' + clean.toLowerCase()] ||
-      null
-    );
+      null;
+    return found ? safeAssetUrl(found) : null;
   }
 
   playSound(rawName, volume = 0.45) {
@@ -186,7 +210,7 @@ class AudioManager {
 
   playMusicTrack(trackName) {
     if (!this.enabled || !trackName) return;
-    const url = this.resolveAudioUrl(trackName) || this.resolveAudioUrl('Alien Vista');
+    const url = this.resolveAudioUrl(trackName) || this.resolveAudioUrl('Alien Vista/Alien Vista');
     if (!url || url === this.currentMusicUrl) return;
 
     this.stopMusic();
@@ -213,7 +237,7 @@ class AudioManager {
   }
 }
 
-// Real-Time CBrickPlugIn Execution Runner (drives orbiting, patrolling, spring, and conditional bricks)
+// Real-Time CBrickPlugIn Execution Runner
 class BrickPluginRunner {
   constructor(brick, engine) {
     this.brick = brick;
@@ -237,11 +261,11 @@ class BrickPluginRunner {
       state: {},
     };
 
-    if (cls === 'CBrickPlugInSimultaneous') {
+    if (cls === 'CBrickPlugInSimultaneous' || cls === 'CBrickPlugInFastForward') {
       const container = raw['Simultaneous PlugIns'];
       const items = container ? asArray(container['Simultaneous PlugIn']) : [];
       node.children = items.map((c) => this.compileNode(c)).filter(Boolean);
-    } else if (cls === 'CBrickPlugInSequence') {
+    } else if (cls === 'CBrickPlugInSequence' || cls === 'CBrickPlugInRandomOrderSequence') {
       const container = raw['Steps'];
       const items = container ? asArray(container['Step']) : [];
       node.children = items.map((c) => this.compileNode(c)).filter(Boolean);
@@ -260,10 +284,54 @@ class BrickPluginRunner {
     for (const c of node.children) this.resetNode(c);
   }
 
+  onMessage(msg) {
+    if (this.root) this.triggerMessageRecursive(this.root, msg);
+  }
+
+  triggerMessageRecursive(node, msg) {
+    if (!node) return;
+    if (node.cls === 'CBrickPlugInWaitForMessage') {
+      const expected = String(node.raw['Message To Wait For'] || node.raw['Message Name'] || '');
+      if (!expected || expected.toLowerCase() === String(msg).toLowerCase()) {
+        node.done = true;
+      }
+    }
+    for (const c of node.children) this.triggerMessageRecursive(c, msg);
+  }
+
   resolvePosition(posObj) {
     if (!posObj || typeof posObj !== 'object') {
       return { x: this.brick.baseX, y: this.brick.baseY };
     }
+    const cls = posObj.__class__ || '';
+
+    if (cls === 'CScriptPositionPointRelativeToBrickStartingPosition') {
+      const [dx, dy] = parsePair(posObj.Position);
+      return { x: this.brick.baseX + dx, y: this.brick.baseY + dy };
+    }
+    if (cls === 'CScriptPositionAbsolutePoint') {
+      const [ax, ay] = parsePair(posObj.Position);
+      return { x: PLAYFIELD.originX + ax, y: PLAYFIELD.originY + ay };
+    }
+    if (cls === 'CScriptPositionCalculatedPoint') {
+      const dx = Number(posObj.X || 0);
+      const dy = Number(posObj.Y || 0);
+      const rel = String(posObj['Relative To Starting Point'] ?? '1') !== '0';
+      return rel
+        ? { x: this.brick.baseX + dx, y: this.brick.baseY + dy }
+        : { x: PLAYFIELD.originX + dx, y: PLAYFIELD.originY + dy };
+    }
+    if (cls === 'CScriptPositionThisBrick') {
+      return { x: this.brick.x, y: this.brick.y };
+    }
+    if (cls === 'CScriptPositionPlayerShip') {
+      return { x: this.engine.ship.x, y: this.engine.ship.y };
+    }
+    if (cls === 'CScriptPositionBall') {
+      const b = this.engine.balls[0];
+      return b ? { x: b.x, y: b.y } : { x: this.engine.ship.x, y: this.engine.ship.y };
+    }
+
     const targetName =
       (posObj.Position && posObj.Position.Name) ||
       posObj.Name ||
@@ -273,8 +341,8 @@ class BrickPluginRunner {
     }
     if (posObj.X !== undefined && posObj.Y !== undefined) {
       return {
-        x: PLAYFIELD.left + Number(posObj.X),
-        y: PLAYFIELD.top + Number(posObj.Y),
+        x: PLAYFIELD.originX + Number(posObj.X),
+        y: PLAYFIELD.originY + Number(posObj.Y),
       };
     }
     return { x: this.brick.baseX, y: this.brick.baseY };
@@ -291,14 +359,16 @@ class BrickPluginRunner {
     const r = node.raw;
 
     switch (node.cls) {
-      case 'CBrickPlugInSimultaneous': {
+      case 'CBrickPlugInSimultaneous':
+      case 'CBrickPlugInFastForward': {
         for (const c of node.children) {
           this.updateNode(c, dt);
         }
         break;
       }
 
-      case 'CBrickPlugInSequence': {
+      case 'CBrickPlugInSequence':
+      case 'CBrickPlugInRandomOrderSequence': {
         if (node.children.length === 0) {
           node.done = true;
           break;
@@ -312,9 +382,13 @@ class BrickPluginRunner {
         if (curr.done) {
           node.activeIdx++;
           if (node.activeIdx >= node.children.length) {
-            // Loop sequences continuously unless they ended with DestroySelf
-            const hasDestroy = node.children.some((c) => c.cls === 'CBrickPlugInDestroySelf');
-            if (hasDestroy) {
+            const hasTerminal = node.children.some(
+              (c) =>
+                c.cls === 'CBrickPlugInDestroySelf' ||
+                c.cls === 'CBrickPlugInDeleteSelf' ||
+                c.cls === 'CBrickPlugInWaitForBrickToBeDestroyed'
+            );
+            if (hasTerminal) {
               node.done = true;
             } else {
               node.activeIdx = 0;
@@ -344,15 +418,18 @@ class BrickPluginRunner {
             const val = Number(spdObj.Speed || 4);
             if (spdObj.__class__ === 'CSecondsPerRotationOrbitSpeed' && val > 0) {
               angSpeed = (Math.PI * 2) / val;
-            } else if (spdObj.__class__ === 'CRPMOrbitSpeed') {
-              angSpeed = (val * Math.PI * 2) / 60;
+            } else if (
+              spdObj.__class__ === 'CRPMOrbitSpeed' ||
+              spdObj.__class__ === 'CRotationPerSecondsOrbitSpeed'
+            ) {
+              angSpeed = val * Math.PI * 2;
             } else if (spdObj.__class__ === 'CPixelsPerSecondOrbitSpeed') {
               angSpeed = val / Math.max(16, node.state.radius);
             }
           }
           node.state.angVel = angSpeed * sign;
-          const stopRot = Number(r.Stop || 0);
-          node.state.maxAngle = stopRot > 0 ? stopRot * Math.PI * 2 : 0;
+          const stopVal = Number(r.Stop || 0);
+          node.state.maxAngle = stopVal > 0 ? stopVal * Math.PI * 2 : 0;
         }
 
         const stepAng = node.state.angVel * dt;
@@ -370,7 +447,8 @@ class BrickPluginRunner {
         break;
       }
 
-      case 'CBrickPlugInMoveToPoint': {
+      case 'CBrickPlugInMoveToPoint':
+      case 'CBrickPlugInMoveToPointAtConstantSpeed': {
         if (!node.initialized) {
           node.initialized = true;
           node.state.startX = this.brick.x;
@@ -380,17 +458,123 @@ class BrickPluginRunner {
           node.state.endY = endPt.y;
           const dist = Math.hypot(endPt.x - this.brick.x, endPt.y - this.brick.y);
           const timeToComplete = Number(r['Time To Complete'] || 0);
+          const constSpeed = Number(r.Speed || 140);
           node.state.duration =
-            timeToComplete > 0 ? timeToComplete : Math.max(0.2, dist / 110);
+            node.cls === 'CBrickPlugInMoveToPointAtConstantSpeed'
+              ? Math.max(0.05, dist / Math.max(10, constSpeed))
+              : timeToComplete > 0
+              ? timeToComplete
+              : 0.01;
           node.elapsed = 0;
         }
         node.elapsed += dt;
-        const t = Math.min(1, node.elapsed / node.state.duration);
-        // Smooth ease-in-out interpolation
+        const endPt = this.resolvePosition(r['End Point']);
+        const t = Math.min(1, node.elapsed / Math.max(0.001, node.state.duration));
         const smooth = t * t * (3 - 2 * t);
-        this.brick.x = node.state.startX + (node.state.endX - node.state.startX) * smooth;
-        this.brick.y = node.state.startY + (node.state.endY - node.state.startY) * smooth;
+        this.brick.x = node.state.startX + (endPt.x - node.state.startX) * smooth;
+        this.brick.y = node.state.startY + (endPt.y - node.state.startY) * smooth;
         if (t >= 1) node.done = true;
+        break;
+      }
+
+      case 'CBrickPlugInMoveBetweenPoints': {
+        if (!node.initialized) {
+          node.initialized = true;
+          node.state.legElapsed = 0;
+          node.state.legsCompleted = 0;
+          const spdObj = r.Speed;
+          let legTime = 1.5;
+          if (spdObj && typeof spdObj === 'object') {
+            const val = Number(spdObj.Speed || 1.5);
+            if (spdObj.__class__ === 'CSecondsPerLegMoveBetweenPointsSpeed' && val > 0) {
+              legTime = val;
+            }
+          }
+          node.state.legDuration = Math.max(0.1, legTime);
+          const stopRaw = r.Stop;
+          node.state.maxLegs =
+            stopRaw === 'At End' ? 1 : Number(stopRaw) > 0 ? Number(stopRaw) * 2 : 0;
+        }
+        const p1 = this.resolvePosition(r['Point 1']);
+        const p2 = this.resolvePosition(r['Point 2']);
+        node.state.legElapsed += dt;
+        while (node.state.legElapsed >= node.state.legDuration) {
+          node.state.legElapsed -= node.state.legDuration;
+          node.state.legsCompleted++;
+          if (node.state.maxLegs > 0 && node.state.legsCompleted >= node.state.maxLegs) {
+            this.brick.x = node.state.legsCompleted % 2 === 1 ? p2.x : p1.x;
+            this.brick.y = node.state.legsCompleted % 2 === 1 ? p2.y : p1.y;
+            node.done = true;
+            return;
+          }
+        }
+        const rawT = node.state.legElapsed / node.state.legDuration;
+        const smooth = rawT * rawT * (3 - 2 * rawT);
+        const forward = node.state.legsCompleted % 2 === 0;
+        const f = forward ? smooth : 1 - smooth;
+        this.brick.x = p1.x + (p2.x - p1.x) * f;
+        this.brick.y = p1.y + (p2.y - p1.y) * f;
+        break;
+      }
+
+      case 'CBrickPlugInMimicMovement': {
+        const guideName = r.Guide && r.Guide.Name;
+        if (!guideName) break;
+        const guide = this.engine.findGuideBrick(guideName, this.brick);
+        if (!guide) break;
+        const scale = Number((r['Scale Movement'] && r['Scale Movement'].by) || 1);
+        const flipX = String(r['Flip Movement Horizontally'] || '0') === '1' ? -1 : 1;
+        const flipY = String(r['Flip Movement Vertically'] || '0') === '1' ? -1 : 1;
+        this.brick.x += guide.frameDx * scale * flipX;
+        this.brick.y += guide.frameDy * scale * flipY;
+        break;
+      }
+
+      case 'CBrickPlugInBlendPositions': {
+        const p1 = this.resolvePosition(r['Point 1']);
+        const p2 = this.resolvePosition(r['Point 2']);
+        this.brick.x = (p1.x + p2.x) * 0.5;
+        this.brick.y = (p1.y + p2.y) * 0.5;
+        break;
+      }
+
+      case 'CBrickPlugInMoveAlongPath': {
+        if (!node.initialized) {
+          node.initialized = true;
+          const pathName = r.Path && r.Path.Name;
+          const pathBrick = this.engine.bricks.find(
+            (b) => b.class === 'CBrickPathPolygon' && b.name === pathName
+          );
+          const pts = (pathBrick && pathBrick.polygonPoints) || [];
+          node.state.points = pts;
+          node.state.loopTime = Math.max(0.5, Number(r['Time To Complete One Loop'] || 6));
+          node.state.backwards = String(r['Loop Type'] || '').includes('Backwards');
+          // Find starting closest position along polygon
+          let bestIdx = 0;
+          let bestD = Infinity;
+          for (let i = 0; i < pts.length; i++) {
+            const d = Math.hypot(pts[i].x - this.brick.x, pts[i].y - this.brick.y);
+            if (d < bestD) {
+              bestD = d;
+              bestIdx = i;
+            }
+          }
+          node.state.startOffset = pts.length > 0 ? bestIdx / pts.length : 0;
+          node.elapsed = 0;
+        }
+        const pts = node.state.points;
+        if (pts && pts.length >= 2) {
+          node.elapsed += dt;
+          const dir = node.state.backwards ? -1 : 1;
+          let u = (node.state.startOffset + (dir * node.elapsed) / node.state.loopTime) % 1;
+          if (u < 0) u += 1;
+          const exact = u * pts.length;
+          const i0 = Math.floor(exact) % pts.length;
+          const i1 = (i0 + 1) % pts.length;
+          const frac = exact - Math.floor(exact);
+          this.brick.x = pts[i0].x + (pts[i1].x - pts[i0].x) * frac;
+          this.brick.y = pts[i0].y + (pts[i1].y - pts[i0].y) * frac;
+        }
         break;
       }
 
@@ -434,9 +618,32 @@ class BrickPluginRunner {
           break;
         }
         const anyAlive = this.engine.bricks.some(
-          (b) => b.alive && b.name === trigName
+          (b) => b.alive && !b.isMarker && b.name === trigName
         );
         if (!anyAlive) node.done = true;
+        break;
+      }
+
+      case 'CBrickPlugInWaitForMessage': {
+        // Completes when onMessage(msg) marks node.done = true
+        break;
+      }
+
+      case 'CBrickPlugInHide': {
+        this.brick.hidden = true;
+        node.done = true;
+        break;
+      }
+
+      case 'CBrickPlugInReveal': {
+        this.brick.hidden = false;
+        node.done = true;
+        break;
+      }
+
+      case 'CBrickPlugInDeleteSelf': {
+        this.brick.alive = false;
+        node.done = true;
         break;
       }
 
@@ -510,7 +717,7 @@ class RicochetEngine {
 
     this.ship = {
       x: PLAYFIELD.centerX,
-      y: 556,
+      y: 564,
       targetX: PLAYFIELD.centerX,
       vx: 0,
       width: 82,
@@ -553,8 +760,8 @@ class RicochetEngine {
     this.audio = new AudioManager(audio);
 
     this.selectedShip =
-      this.ships.find((s) => s.key.toLowerCase().includes('infinity')) ||
-      this.ships.find((s) => s.key.toLowerCase().includes('normal')) ||
+      this.ships.find((s) => s.key === 'Default Player Ship') ||
+      this.ships.find((s) => s.key === 'Aqua Striper') ||
       this.ships[0];
 
     this.sprites.preloadKeys([
@@ -748,18 +955,7 @@ class RicochetEngine {
 
     this.sprites.preloadKeys([bgDef.backgroundImage, bgDef.midgroundImage, bgDef.foregroundImage]);
 
-    // First pass: register named bricks and CBrickPositionMarker pivots
-    for (const raw of roundDef.bricks || []) {
-      if (raw.name) {
-        this.pivotMarkers.set(String(raw.name), {
-          x: PLAYFIELD.left + Number(raw.x || 0),
-          y: PLAYFIELD.top + Number(raw.y || 0),
-          brickRef: null,
-        });
-      }
-    }
-
-    // Second pass: instantiate bricks
+    // Instantiate all bricks and markers
     for (let i = 0; i < (roundDef.bricks || []).length; i++) {
       const raw = roundDef.bricks[i];
       const styleKey = raw.style || '';
@@ -775,22 +971,21 @@ class RicochetEngine {
       const meta = this.sprites.getMeta(seqKey);
       this.sprites.getImage(seqKey);
 
-      let w = 38;
-      let h = 18;
+      let w = 42;
+      let h = 24;
       if (meta && meta.frames && meta.frames.length > 0) {
-        w = meta.frames[0].w || 38;
-        h = meta.frames[0].h || 18;
+        w = meta.frames[0].w || 42;
+        h = meta.frames[0].h || 24;
       } else if (meta && meta.sheetW && meta.sheetH) {
         w = meta.sheetW;
         h = meta.sheetH;
       }
 
-      // Note: Ricochet brick coordinates in .Round files are center/hotspot coordinates relative to the playfield!
-      const cx = PLAYFIELD.left + Number(raw.x || 0);
-      const cy = PLAYFIELD.top + Number(raw.y || 0);
+      const cx = PLAYFIELD.originX + Number(raw.x || 0);
+      const cy = PLAYFIELD.originY + Number(raw.y || 0);
 
       const cls = raw.class || 'CBrickNormal';
-      const isMarker = cls === 'CBrickPositionMarker';
+      const isMarker = cls === 'CBrickPositionMarker' || cls === 'CBrickPathPolygon';
       const isIndestructible =
         cls === 'CBrickNearlyIndestructible' ||
         cls === 'CBrickIndestructible' ||
@@ -803,6 +998,18 @@ class RicochetEngine {
         cls === 'CBrickRail';
 
       const maxHp = cls === 'CBrickNHitSide' ? 3 : 1;
+
+      // Parse polygon points if CBrickPathPolygon
+      let polygonPoints = null;
+      if (cls === 'CBrickPathPolygon' && raw.extra && raw.extra.m_Polygon) {
+        const nums = String(raw.extra.m_Polygon)
+          .split(',')
+          .map((n) => Number(n.trim()));
+        polygonPoints = [];
+        for (let p = 0; p + 1 < nums.length; p += 2) {
+          polygonPoints.push({ x: cx + nums[p], y: cy + nums[p + 1] });
+        }
+      }
 
       const brick = {
         id: i,
@@ -817,6 +1024,8 @@ class RicochetEngine {
         y: cy,
         prevX: cx,
         prevY: cy,
+        frameDx: 0,
+        frameDy: 0,
         vx: 0,
         vy: 0,
         baseX: cx,
@@ -828,16 +1037,21 @@ class RicochetEngine {
         indestructible: isIndestructible,
         isMarker,
         isCoin: cls === 'CBrickCoin',
-        isExploder: cls === 'CBrickExploder' || cls === 'CBrickDetonator',
+        isExploder: cls === 'CBrickExploder' || cls === 'CBrickDetonator' || cls === 'CBrickConcussion',
         hidden: false,
         alive: !isMarker,
         hitFlashTime: 0,
         score: Number(styleDef.score || 100),
+        polygonPoints,
         runner: null,
       };
 
+      // Prefer CBrickPositionMarker when multiple bricks share a name (e.g. '1 Right Arm Upper')
       if (brick.name) {
-        this.pivotMarkers.set(brick.name, { x: cx, y: cy, brickRef: brick });
+        const existing = this.pivotMarkers.get(brick.name);
+        if (!existing || isMarker) {
+          this.pivotMarkers.set(brick.name, { x: cx, y: cy, brickRef: brick });
+        }
       }
 
       brick.runner = new BrickPluginRunner(brick, this);
@@ -869,7 +1083,10 @@ class RicochetEngine {
 
   extractBrickPowerup(raw) {
     const ext = raw.extra || {};
+    const forced = ext['Forced Power-Ups'] && ext['Forced Power-Ups']['Forced Power-Up'];
     const p =
+      (Array.isArray(forced) ? forced[0] : forced) ||
+      ext['Power-Up'] ||
       ext['Power-Up Style'] ||
       ext['PowerUp'] ||
       ext['Power Up'] ||
@@ -900,17 +1117,35 @@ class RicochetEngine {
   }
 
   findPivotPoint(targetName, callerBrick) {
-    if (targetName && this.pivotMarkers.has(String(targetName))) {
-      const entry = this.pivotMarkers.get(String(targetName));
-      if (entry.brickRef) {
-        return { x: entry.brickRef.x, y: entry.brickRef.y };
+    if (targetName) {
+      const key = String(targetName);
+      // Prefer a CBrickPositionMarker with this name (if different from callerBrick)
+      const marker = this.bricks.find(
+        (b) => b.isMarker && b.name === key && b !== callerBrick
+      );
+      if (marker) return { x: marker.x, y: marker.y };
+
+      if (this.pivotMarkers.has(key)) {
+        const entry = this.pivotMarkers.get(key);
+        if (entry.brickRef && entry.brickRef !== callerBrick) {
+          return { x: entry.brickRef.x, y: entry.brickRef.y };
+        }
+        return { x: entry.x, y: entry.y };
       }
-      return { x: entry.x, y: entry.y };
     }
     return {
       x: callerBrick ? callerBrick.baseX : PLAYFIELD.centerX,
       y: callerBrick ? callerBrick.baseY : PLAYFIELD.centerY,
     };
+  }
+
+  findGuideBrick(guideName, callerBrick) {
+    const key = String(guideName);
+    return (
+      this.bricks.find((b) => b.isMarker && b.name === key && b !== callerBrick) ||
+      this.bricks.find((b) => b.name === key && b !== callerBrick) ||
+      null
+    );
   }
 
   spawnCaughtBall() {
@@ -1105,16 +1340,21 @@ class RicochetEngine {
     if (this.ship.stingerCooldown > 0) this.ship.stingerCooldown -= dt;
     if (this.mouseDownLeft) this.fireWeapons();
 
-    // 2. Update real-time CBrickPlugIn motion scripts on all bricks
-    for (const b of this.bricks) {
-      b.prevX = b.x;
-      b.prevY = b.y;
-      if (b.runner && (b.alive || b.isMarker)) {
-        b.runner.update(dt);
+    // 2. Update real-time CBrickPlugIn motion scripts (markers first so mimic followers get fresh frameDx/frameDy)
+    for (const pass of [true, false]) {
+      for (const b of this.bricks) {
+        if (b.isMarker !== pass) continue;
+        b.prevX = b.x;
+        b.prevY = b.y;
+        if (b.runner && (b.alive || b.isMarker)) {
+          b.runner.update(dt);
+        }
+        b.frameDx = b.x - b.prevX;
+        b.frameDy = b.y - b.prevY;
+        b.vx = b.frameDx / Math.max(0.001, dt);
+        b.vy = b.frameDy / Math.max(0.001, dt);
+        if (b.hitFlashTime > 0) b.hitFlashTime = Math.max(0, b.hitFlashTime - dt);
       }
-      b.vx = (b.x - b.prevX) / Math.max(0.001, dt);
-      b.vy = (b.y - b.prevY) / Math.max(0.001, dt);
-      if (b.hitFlashTime > 0) b.hitFlashTime = Math.max(0, b.hitFlashTime - dt);
     }
 
     // 3. Ion Sphere Recall (Right-Click or Spacebar tractor pull)
@@ -1213,7 +1453,7 @@ class RicochetEngine {
           this.ship.shieldActive = false;
           ball.y = PLAYFIELD.bottom - ball.radius - 4;
           ball.vy = -Math.abs(ball.vy);
-          this.audio.playSound('Bounce');
+          this.audio.playSound('Power Ups/Safety Bumper SAVE');
         } else {
           this.balls.splice(bi, 1);
           if (this.balls.length === 0) {
@@ -1358,6 +1598,7 @@ class RicochetEngine {
           this.audio.playSound('Brick Turned Off');
           for (const other of this.bricks) {
             if (other.class === 'CBrickOnOff') other.hidden = !other.hidden;
+            if (other.runner) other.runner.onMessage('');
           }
         }
 
@@ -1406,9 +1647,9 @@ class RicochetEngine {
     this.ringsInRound++;
     this.totalRings++;
     this.score += 500;
-    this.audio.playSound('Rings Earn Ball');
+    this.audio.playSound(brick.styleDef.pickupSound || 'Rings Earn Ball');
     this.particles.push({
-      spriteKey: 'Effects/Ring Pickup',
+      spriteKey: brick.styleDef.pickupSeq || 'Effects/Ring Pickup',
       x: brick.x,
       y: brick.y,
       elapsed: 0,
@@ -1428,20 +1669,20 @@ class RicochetEngine {
 
     if (brick.indestructible && !opts.piercing) {
       brick.hitFlashTime = 0.25;
-      this.audio.playSound(brick.styleDef.hitSound || 'Metal Damage');
+      this.audio.playSound(brick.styleDef.indestructibleSound || 'Metal Damage');
       return;
     }
 
     brick.hp -= opts.piercing ? 3 : 1;
     if (brick.hp > 0) {
       brick.hitFlashTime = 0.22;
-      this.audio.playSound(brick.styleDef.hitSound || 'Metal Damage');
+      this.audio.playSound(brick.styleDef.damagedSound || 'Metal Damage');
       return;
     }
 
     brick.alive = false;
     this.score += brick.score;
-    this.audio.playSound(brick.styleDef.destroyedSound || 'Bounce');
+    this.audio.playSound(brick.styleDef.destroyedSound || 'Pop Brick');
 
     const expKey =
       brick.styleDef.destroyedSeq && brick.styleDef.destroyedSeq !== '!None'
@@ -1472,7 +1713,7 @@ class RicochetEngine {
 
     if (brick.isExploder || opts.fire) {
       this.audio.playSound('Super Explode Brick');
-      const radius = brick.isExploder ? 62 : 46;
+      const radius = brick.isExploder ? 72 : 48;
       for (const other of this.bricks) {
         if (!other.alive || other === brick) continue;
         if (Math.hypot(other.x - brick.x, other.y - brick.y) <= radius) {
@@ -1481,7 +1722,7 @@ class RicochetEngine {
             x: other.x,
             y: other.y,
             elapsed: 0,
-            delay: 0.07,
+            delay: 0.06,
             duration: 0.5,
             additive: true,
             onTrigger: () => this.damageBrick(other, { piercing: true }),
@@ -1516,7 +1757,7 @@ class RicochetEngine {
 
     // Background image
     const bgImg = this.currentBgDef && this.currentBgDef.backgroundImage;
-    if (!this.sprites.draw(ctx, bgImg, 6, 11, { topLeft: true })) {
+    if (!this.sprites.draw(ctx, bgImg, 0, 0, { topLeft: true })) {
       ctx.fillStyle = '#071126';
       ctx.fillRect(PLAYFIELD.left, PLAYFIELD.top, PLAYFIELD.width, PLAYFIELD.height);
     }
@@ -1549,16 +1790,16 @@ class RicochetEngine {
       ctx.restore();
     }
 
-    // 2. Render Bricks
+    // 2. Render Bricks (drawn centered on their logical coordinates)
     for (const b of this.bricks) {
       if (!b.alive || b.hidden) continue;
 
       if (b.isCoin) {
-        this.sprites.draw(ctx, 'Bricks/Common/Coin', b.x, b.y, { time: this.time });
+        this.sprites.draw(ctx, 'Bricks/Common/Coin', b.x, b.y, { time: this.time, center: true });
         continue;
       }
 
-      const drawn = this.sprites.draw(ctx, b.imageKey, b.x, b.y, { time: this.time });
+      const drawn = this.sprites.draw(ctx, b.imageKey, b.x, b.y, { time: this.time, center: true });
       if (!drawn) {
         ctx.fillStyle = b.indestructible ? '#5a6f94' : '#2a85d6';
         ctx.fillRect(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h);
@@ -1569,9 +1810,9 @@ class RicochetEngine {
       // Multi-hit / Metallic hit overlays
       const hitImgs = b.styleDef.hitImages || [];
       if (b.maxHp === 3 && b.hp === 2 && hitImgs[0]) {
-        this.sprites.draw(ctx, hitImgs[0], b.x, b.y, { time: this.time });
+        this.sprites.draw(ctx, hitImgs[0], b.x, b.y, { time: this.time, center: true });
       } else if (b.maxHp === 3 && b.hp === 1 && (hitImgs[1] || hitImgs[0])) {
-        this.sprites.draw(ctx, hitImgs[1] || hitImgs[0], b.x, b.y, { time: this.time });
+        this.sprites.draw(ctx, hitImgs[1] || hitImgs[0], b.x, b.y, { time: this.time, center: true });
       }
 
       if (b.hitFlashTime > 0 && hitImgs[0]) {
@@ -1579,6 +1820,7 @@ class RicochetEngine {
           time: this.time,
           alpha: b.hitFlashTime / 0.25,
           additive: true,
+          center: true,
         });
       }
     }
@@ -1597,7 +1839,7 @@ class RicochetEngine {
     // 4. Render Player Ship (21-frame banking sprite + weapon pods)
     const shipSprite =
       (this.selectedShip && this.selectedShip.sequence) ||
-      'Player Ship/Selectable Player Ships/Ricochet Infinity';
+      'Player Ship/Selectable Player Ships/Default Player Ship';
     const bankFrame = Math.max(0, Math.min(20, Math.round(this.ship.bankFrame)));
     if (
       !this.sprites.draw(ctx, shipSprite, this.ship.x, this.ship.y, {
@@ -1621,7 +1863,7 @@ class RicochetEngine {
 
     // 5. Render Falling Power-Ups
     for (const pu of this.fallingPowerups) {
-      if (!this.sprites.draw(ctx, pu.spriteKey, pu.x, pu.y, { time: this.time })) {
+      if (!this.sprites.draw(ctx, pu.spriteKey, pu.x, pu.y, { time: this.time, center: true })) {
         ctx.fillStyle = '#ffc83b';
         ctx.beginPath();
         ctx.arc(pu.x, pu.y, 12, 0, Math.PI * 2);
@@ -1632,7 +1874,7 @@ class RicochetEngine {
     // 6. Render Projectiles (Lasers & Homing Stinger Missiles)
     for (const p of this.projectiles) {
       if (p.kind === 'stinger') {
-        if (!this.sprites.draw(ctx, 'Power Ups/Stinger Missile', p.x, p.y, { time: this.time })) {
+        if (!this.sprites.draw(ctx, 'Power Ups/Stinger Missile', p.x, p.y, { time: this.time, center: true })) {
           ctx.fillStyle = '#ff9838';
           ctx.fillRect(p.x - 3, p.y - 6, 6, 12);
         }
@@ -1657,7 +1899,7 @@ class RicochetEngine {
         ctx.fill();
       }
 
-      if (!this.sprites.draw(ctx, ball.spriteKey, ball.x, ball.y, { time: this.time })) {
+      if (!this.sprites.draw(ctx, ball.spriteKey, ball.x, ball.y, { time: this.time, center: true })) {
         ctx.fillStyle = '#ffffff';
         ctx.beginPath();
         ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
@@ -1672,6 +1914,7 @@ class RicochetEngine {
       this.sprites.draw(ctx, pt.spriteKey, pt.x, pt.y, {
         time: activeTime,
         additive: pt.additive,
+        center: true,
       });
     }
 
@@ -1719,7 +1962,7 @@ class RicochetEngine {
 
     for (let i = 0; i < Math.min(6, this.lives); i++) {
       const bx = 668 + i * 19;
-      this.sprites.draw(ctx, this.selectedBallKey, bx, 136, { time: this.time, scale: 0.85 });
+      this.sprites.draw(ctx, this.selectedBallKey, bx, 136, { time: this.time, scale: 0.85, center: true });
     }
 
     ctx.fillStyle = '#8ea5cc';
@@ -1744,12 +1987,12 @@ class RicochetEngine {
     ctx.fillStyle = '#8ea5cc';
     ctx.font = 'bold 10.5px "RicochetArchive", sans-serif';
     const planetName = this.getPlanetDisplayName(this.currentPackSlug);
-    ctx.fillText(planetName.toUpperCase().slice(0, 18), hudCenterX, 272);
+    ctx.fillText(planetName.toUpperCase().slice(0, 20), hudCenterX, 272);
 
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 12px -apple-system, sans-serif';
+    ctx.font = 'bold 11.5px -apple-system, sans-serif';
     const roundTitle = (this.currentRound && this.currentRound.name) || 'Round';
-    ctx.fillText(roundTitle.slice(0, 18), hudCenterX, 292);
+    ctx.fillText(roundTitle.slice(0, 22), hudCenterX, 292);
 
     const destructibleCount = this.bricks.filter(
       (b) => b.alive && !b.indestructible && !b.isCoin
@@ -1769,7 +2012,7 @@ class RicochetEngine {
       });
       ctx.fillStyle = '#ffc83b';
       ctx.font = 'bold 11px -apple-system, sans-serif';
-      ctx.fillText(this.selectedShip.name.slice(0, 18), hudCenterX, 422);
+      ctx.fillText(this.selectedShip.name.slice(0, 20), hudCenterX, 422);
     }
 
     const recallActive = this.mouseDownRight || this.keys.recall;
@@ -1848,7 +2091,7 @@ class RicochetEngine {
       const iconMeta = this.sprites.getMeta(ship.iconSequence) || this.sprites.getMeta(ship.sequence);
       if (iconMeta) {
         const img = document.createElement('img');
-        img.src = iconMeta.url;
+        img.src = safeAssetUrl(iconMeta.url);
         img.alt = ship.name;
         preview.appendChild(img);
       }
@@ -1879,7 +2122,7 @@ class RicochetEngine {
       const meta = this.sprites.getMeta(b.key);
       if (meta) {
         const img = document.createElement('img');
-        img.src = meta.url;
+        img.src = safeAssetUrl(meta.url);
         img.alt = b.name;
         preview.appendChild(img);
       }
@@ -1923,7 +2166,7 @@ class RicochetEngine {
 
         const img = document.createElement('img');
         img.loading = 'lazy';
-        img.src = m.url;
+        img.src = safeAssetUrl(m.url);
         img.alt = m.key;
 
         const name = document.createElement('div');
@@ -1981,7 +2224,7 @@ class RicochetEngine {
       const meta = this.sprites.getMeta(item.image);
       if (meta) {
         const img = document.createElement('img');
-        img.src = meta.url;
+        img.src = safeAssetUrl(meta.url);
         img.alt = item.title;
         card.appendChild(img);
       }
@@ -2041,8 +2284,15 @@ class RicochetEngine {
   }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
+const bootEngine = () => {
+  if (window.ricochetEngine) return;
   const engine = new RicochetEngine();
   window.ricochetEngine = engine;
   engine.init();
-});
+};
+
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', bootEngine);
+} else {
+  bootEngine();
+}

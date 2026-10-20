@@ -38,51 +38,34 @@ def build_icns():
 
 
 def compile_universal_binary(swift_src: Path, exe_path: Path):
-    arm64_bin = ROOT / 'macos' / 'RicochetInfinity_arm64'
-    x86_64_bin = ROOT / 'macos' / 'RicochetInfinity_x86_64'
-
-    subprocess.run(
-        [
-            'swiftc',
-            '-O',
-            '-target',
-            'arm64-apple-macosx11.0',
-            str(swift_src),
-            '-framework',
-            'Cocoa',
-            '-framework',
-            'WebKit',
-            '-framework',
-            'UniformTypeIdentifiers',
-            '-o',
-            str(arm64_bin),
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [
-            'swiftc',
-            '-O',
-            '-target',
-            'x86_64-apple-macosx11.0',
-            str(swift_src),
-            '-framework',
-            'Cocoa',
-            '-framework',
-            'WebKit',
-            '-framework',
-            'UniformTypeIdentifiers',
-            '-o',
-            str(x86_64_bin),
-        ],
-        check=True,
-    )
-    subprocess.run(
-        ['lipo', '-create', str(arm64_bin), str(x86_64_bin), '-output', str(exe_path)],
-        check=True,
-    )
-    arm64_bin.unlink(missing_ok=True)
-    x86_64_bin.unlink(missing_ok=True)
+    slices = []
+    for arch in ('arm64', 'x86_64'):
+        slice_path = ROOT / 'macos' / f'RicochetInfinity_{arch}'
+        slices.append(slice_path)
+        subprocess.run(
+            [
+                'swiftc',
+                '-O',
+                '-target',
+                f'{arch}-apple-macosx11.0',
+                str(swift_src),
+                '-framework',
+                'Cocoa',
+                '-framework',
+                'WebKit',
+                '-o',
+                str(slice_path),
+            ],
+            check=True,
+        )
+    try:
+        subprocess.run(
+            ['lipo', '-create', *map(str, slices), '-output', str(exe_path)],
+            check=True,
+        )
+    finally:
+        for slice_path in slices:
+            slice_path.unlink(missing_ok=True)
 
 
 def package_single_files():
@@ -139,6 +122,9 @@ def package_single_files():
 
 
 def main():
+    # Fail early with a clear message instead of a mid-build traceback.
+    if not (ROOT / 'public' / 'index.html').exists():
+        raise SystemExit(f'Missing {ROOT / "public" / "index.html"}; nothing to bundle.')
     if APP_BUNDLE.exists():
         shutil.rmtree(APP_BUNDLE)
     MACOS_DIR.mkdir(parents=True, exist_ok=True)
@@ -151,23 +137,24 @@ def main():
     build_icns()
 
     # Embed all compiled assets inside Ricochet Infinity.app/Contents/Resources/public
-    shutil.copytree(ROOT / 'public', RESOURCES_DIR / 'public')
+    shutil.copytree(
+        ROOT / 'public', RESOURCES_DIR / 'public', ignore=shutil.ignore_patterns('.DS_Store', '__pycache__')
+    )
 
     info = {
         'CFBundleName': 'Ricochet Infinity',
         'CFBundleDisplayName': 'Ricochet Infinity',
         'CFBundleIdentifier': 'com.reflexive.ricochetinfinity.macos',
+        'CFBundleInfoDictionaryVersion': '6.0',
         'CFBundleVersion': '3.0.73',
         'CFBundleShortVersionString': '3.0.73',
         'CFBundlePackageType': 'APPL',
         'CFBundleExecutable': 'RicochetInfinity',
         'CFBundleIconFile': 'AppIcon',
         'LSMinimumSystemVersion': '11.0',
+        'LSApplicationCategoryType': 'public.app-category.arcade-games',
         'NSHighResolutionCapable': True,
-        'NSAppTransportSecurity': {
-            'NSAllowsLocalNetworking': True,
-            'NSAllowsArbitraryLoads': True,
-        },
+        'NSPrincipalClass': 'NSApplication',
     }
     with open(CONTENTS / 'Info.plist', 'wb') as f:
         plistlib.dump(info, f)

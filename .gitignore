@@ -6,3 +6,5 @@ extracted/
 Ricochet Infinity.app/
 dist/
 macos/AppIcon.iconset/
+# Copyrighted retail installer (input to the extraction pipeline, never commit)
+*.exe

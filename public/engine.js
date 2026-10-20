@@ -1,40 +1,34 @@
 // Ricochet Infinity — Native macOS HTML5/Canvas Engine
 // Drives all 1,274 decoded .Frame/.Sequence sprites, 378 retail rounds, 27 ships, 33 power-ups, and 228 OGG audio tracks.
 
-// 1. Invoker Commands API Feature Detection (per modern-web-guidance)
+// 1. Invoker Commands API (commandfor/command) — local fallback only.
+// The app is fully offline, so no remote polyfill is ever fetched.
 if (!('commandForElement' in HTMLButtonElement.prototype)) {
-  import('https://esm.sh/invokers-polyfill').catch(() => {
-    // Offline fallback if CDN is unreachable
-    document.querySelectorAll('button[commandfor]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const targetId = btn.getAttribute('commandfor');
-        const cmd = btn.getAttribute('command');
-        const target = document.getElementById(targetId);
-        if (!target) return;
-        const evt = new CustomEvent('command', { detail: { command: cmd } });
-        evt.command = cmd;
-        target.dispatchEvent(evt);
-        if (cmd === 'show-modal' && typeof target.showModal === 'function') target.showModal();
-        else if (cmd === 'close' && typeof target.close === 'function') target.close();
-      });
+  document.querySelectorAll('button[commandfor]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = document.getElementById(btn.getAttribute('commandfor'));
+      if (!target) return;
+      const cmd = btn.getAttribute('command');
+      if (cmd === 'show-modal' && typeof target.showModal === 'function') target.showModal();
+      else if (cmd === 'close' && typeof target.close === 'function') target.close();
     });
   });
 }
 
 // Playfield geometry inside the 800x600 Score Board Frame:
-// Transparent window in Score Board Frame.png is x: 12..626 (w=614), y: 12..599 (h=587).
+// The transparent window in Score Board Frame.png spans x: 12..625 (w=614), y: 12..599 (h=588).
 // Brick coordinates (0,0) in .Round files correspond to the top-left grid slot, whose center is (+22, +13).
 const PLAYFIELD = {
   left: 12,
   top: 12,
   right: 626,
-  bottom: 596,
+  bottom: 600,
   width: 614,
-  height: 584,
+  height: 588,
   originX: 34, // 12 + 22 (half standard 44px brick width)
   originY: 25, // 12 + 13 (half standard 26px brick height)
   centerX: 319,
-  centerY: 304,
+  centerY: 306,
 };
 
 function normalizeResKey(raw) {
@@ -58,7 +52,8 @@ function parsePair(str) {
 
 function safeAssetUrl(url) {
   if (!url) return '';
-  return encodeURI(url).replace(/#/g, '%23');
+  // Encode each path segment so '#', '?', '%', '+' in asset file names survive the round trip.
+  return String(url).split('/').map(encodeURIComponent).join('/');
 }
 
 class SpriteManager {
@@ -101,6 +96,13 @@ class SpriteManager {
     return null;
   }
 
+  // Seconds one full pass through a sequence takes (fallback when the sequence is unknown/static).
+  getDuration(rawKey, fallback = 0.45) {
+    const meta = this.getMeta(rawKey);
+    if (!meta || !meta.frames || meta.frames.length < 2) return fallback;
+    return meta.frames.length / (meta.fps || 20);
+  }
+
   preloadKeys(keys) {
     for (const k of keys) {
       if (k && k !== '!None') this.getImage(k);
@@ -135,7 +137,9 @@ class SpriteManager {
       } else {
         const fps = options.fps || meta.fps || 20;
         const timeSec = options.time ?? (performance.now() / 1000);
-        frameIdx = Math.floor(timeSec * fps) % frames.length;
+        const rawIdx = Math.floor(Math.max(0, timeSec) * fps);
+        // One-shot effects hold their last frame instead of looping back to frame 0.
+        frameIdx = options.once ? Math.min(frames.length - 1, rawIdx) : rawIdx % frames.length;
       }
       const f = frames[frameIdx];
       if (!f || f.w <= 0 || f.h <= 0) {
@@ -289,14 +293,103 @@ class BrickPluginRunner {
   }
 
   triggerMessageRecursive(node, msg) {
-    if (!node) return;
+    if (!node || node.done) return;
     if (node.cls === 'CBrickPlugInWaitForMessage') {
       const expected = String(node.raw['Message To Wait For'] || node.raw['Message Name'] || '');
       if (!expected || expected.toLowerCase() === String(msg).toLowerCase()) {
         node.done = true;
       }
+      return;
+    }
+    if (node.cls === 'CBrickPlugInSequence' || node.cls === 'CBrickPlugInRandomOrderSequence') {
+      // Steps run one at a time: a message only reaches the step that is currently executing.
+      this.triggerMessageRecursive(node.children[node.activeIdx], msg);
+      return;
     }
     for (const c of node.children) this.triggerMessageRecursive(c, msg);
+  }
+
+  // Finds the brick (or live ball) a CScriptReferenceToTarget points at.
+  lookupTarget(ref) {
+    const name = ref && typeof ref === 'object' ? ref.Name : ref;
+    if (!name) return null;
+    if (name === 'Ball') return this.engine.balls[0] || null;
+    const bricks = this.engine.bricks;
+    return bricks.find((b) => b.isMarker && b.name === name) || bricks.find((b) => b.name === name) || null;
+  }
+
+  // Numeric subset of the retail scripting-expression language. Returns NaN for anything unsupported.
+  evalExpr(expr) {
+    if (expr === undefined || expr === null) return NaN;
+    if (typeof expr === 'number') return expr;
+    if (typeof expr === 'string') return expr.trim() === '' ? NaN : Number(expr);
+    if (typeof expr !== 'object') return NaN;
+
+    const ev = (k) => this.evalExpr(expr[k]);
+    switch (expr.__class__) {
+      case 'CExpressionAdd':
+        return ev('Operand A') + ev('Operand B');
+      case 'CExpressionSubtract':
+        return ev('Operand A') - ev('Operand B');
+      case 'CExpressionMultiply':
+        return ev('Operand A') * ev('Operand B');
+      case 'CExpressionDivide': {
+        const d = ev('Operand B');
+        return d === 0 ? NaN : ev('Operand A') / d;
+      }
+      case 'CExpressionRandomFloat': {
+        const lo = ev('Minumum (inclusive)');
+        const hi = ev('Maximum (inclusive)');
+        return lo + Math.random() * (hi - lo);
+      }
+      case 'CExpressionRandomInteger': {
+        const lo = Math.ceil(ev('Minumum (inclusive)'));
+        const hi = Math.floor(ev('Maximum (inclusive)'));
+        return lo + Math.floor(Math.random() * (hi - lo + 1));
+      }
+      case 'CExpressionScale': {
+        const inLo = ev('Minumum Input Value');
+        const inHi = ev('Maximum Input Value');
+        const outLo = ev('Minumum Output Value');
+        const outHi = ev('Maximum Output Value');
+        if (inHi === inLo) return NaN;
+        let out = outLo + ((ev('Input Value') - inLo) / (inHi - inLo)) * (outHi - outLo);
+        if (String(expr['Clamp Output'] ?? '0') === '1') {
+          out = Math.max(Math.min(outLo, outHi), Math.min(Math.max(outLo, outHi), out));
+        }
+        return out;
+      }
+      case 'CExpressionBrickXPosition': {
+        const t = this.lookupTarget(expr.Brick);
+        return t ? t.x - PLAYFIELD.originX : NaN;
+      }
+      case 'CExpressionBrickYPosition': {
+        const t = this.lookupTarget(expr.Brick);
+        return t ? t.y - PLAYFIELD.originY : NaN;
+      }
+      case 'CExpressionBrickStartingXPosition': {
+        const t = this.lookupTarget(expr.Brick);
+        return t && t.baseX !== undefined ? t.baseX - PLAYFIELD.originX : NaN;
+      }
+      case 'CExpressionBrickStartingYPosition': {
+        const t = this.lookupTarget(expr.Brick);
+        return t && t.baseY !== undefined ? t.baseY - PLAYFIELD.originY : NaN;
+      }
+      case 'CExpressionDistanceBetweenPoints': {
+        const a = this.resolvePosition(expr['Point 1']);
+        const b = this.resolvePosition(expr['Point 2']);
+        return Math.hypot(a.x - b.x, a.y - b.y);
+      }
+      case 'CExpressionRingsCollectedOnThisLevel':
+        return this.engine.ringsInRound;
+      default:
+        return NaN;
+    }
+  }
+
+  evalNumber(expr, fallback) {
+    const v = this.evalExpr(expr);
+    return Number.isFinite(v) ? v : fallback;
   }
 
   resolvePosition(posObj) {
@@ -314,8 +407,8 @@ class BrickPluginRunner {
       return { x: PLAYFIELD.originX + ax, y: PLAYFIELD.originY + ay };
     }
     if (cls === 'CScriptPositionCalculatedPoint') {
-      const dx = Number(posObj.X || 0);
-      const dy = Number(posObj.Y || 0);
+      const dx = this.evalNumber(posObj.X, 0);
+      const dy = this.evalNumber(posObj.Y, 0);
       const rel = String(posObj['Relative To Starting Point'] ?? '1') !== '0';
       return rel
         ? { x: this.brick.baseX + dx, y: this.brick.baseY + dy }
@@ -341,8 +434,8 @@ class BrickPluginRunner {
     }
     if (posObj.X !== undefined && posObj.Y !== undefined) {
       return {
-        x: PLAYFIELD.originX + Number(posObj.X),
-        y: PLAYFIELD.originY + Number(posObj.Y),
+        x: PLAYFIELD.originX + this.evalNumber(posObj.X, 0),
+        y: PLAYFIELD.originY + this.evalNumber(posObj.Y, 0),
       };
     }
     return { x: this.brick.baseX, y: this.brick.baseY };
@@ -388,7 +481,8 @@ class BrickPluginRunner {
                 c.cls === 'CBrickPlugInDeleteSelf' ||
                 c.cls === 'CBrickPlugInWaitForBrickToBeDestroyed'
             );
-            if (hasTerminal) {
+            // `When Done=Stop` (5,758 sequences in the retail rounds) ends the script instead of looping.
+            if (hasTerminal || String(r['When Done'] || '') === 'Stop') {
               node.done = true;
             } else {
               node.activeIdx = 0;
@@ -415,7 +509,7 @@ class BrickPluginRunner {
           let angSpeed = (Math.PI * 2) / 5.0;
           const spdObj = r.Speed;
           if (spdObj && typeof spdObj === 'object') {
-            const val = Number(spdObj.Speed || 4);
+            const val = Number(spdObj.Speed ?? spdObj.speed ?? 4);
             if (spdObj.__class__ === 'CSecondsPerRotationOrbitSpeed' && val > 0) {
               angSpeed = (Math.PI * 2) / val;
             } else if (
@@ -457,8 +551,8 @@ class BrickPluginRunner {
           node.state.endX = endPt.x;
           node.state.endY = endPt.y;
           const dist = Math.hypot(endPt.x - this.brick.x, endPt.y - this.brick.y);
-          const timeToComplete = Number(r['Time To Complete'] || 0);
-          const constSpeed = Number(r.Speed || 140);
+          const timeToComplete = this.evalNumber(r['Time To Complete'], 0);
+          const constSpeed = this.evalNumber(r.Speed, 140) || 140;
           node.state.duration =
             node.cls === 'CBrickPlugInMoveToPointAtConstantSpeed'
               ? Math.max(0.05, dist / Math.max(10, constSpeed))
@@ -545,11 +639,30 @@ class BrickPluginRunner {
           const pathBrick = this.engine.bricks.find(
             (b) => b.class === 'CBrickPathPolygon' && b.name === pathName
           );
-          const pts = (pathBrick && pathBrick.polygonPoints) || [];
+          const pts = ((pathBrick && pathBrick.polygonPoints) || []).slice();
+          // Close the polygon so the final edge back to the first vertex is traversed.
+          if (pts.length >= 2) {
+            const first = pts[0];
+            const last = pts[pts.length - 1];
+            if (Math.hypot(first.x - last.x, first.y - last.y) > 0.5) pts.push({ x: first.x, y: first.y });
+          }
+          // Cumulative arc length: "Constant Speed" paths advance by distance, not by vertex.
+          const cum = [0];
+          for (let i = 1; i < pts.length; i++) {
+            cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+          }
           node.state.points = pts;
+          node.state.cum = cum;
+          node.state.total = cum[cum.length - 1] || 0;
           node.state.loopTime = Math.max(0.5, Number(r['Time To Complete One Loop'] || 6));
-          node.state.backwards = String(r['Loop Type'] || '').includes('Backwards');
-          // Find starting closest position along polygon
+
+          const loopType = String(r['Loop Type'] || '');
+          node.state.pingPong = /back and forth|forth and back/i.test(loopType);
+          node.state.dir = /backwards|^back and forth/i.test(loopType) ? -1 : 1;
+          const stopRaw = r.Stop;
+          node.state.maxLoops = stopRaw === 'At End' ? 1 : Number(stopRaw) > 0 ? Number(stopRaw) : 0;
+
+          // Start at the vertex nearest to the brick's current position.
           let bestIdx = 0;
           let bestD = Infinity;
           for (let i = 0; i < pts.length; i++) {
@@ -559,21 +672,31 @@ class BrickPluginRunner {
               bestIdx = i;
             }
           }
-          node.state.startOffset = pts.length > 0 ? bestIdx / pts.length : 0;
+          node.state.startOffset = node.state.total > 0 ? cum[bestIdx] / node.state.total : 0;
           node.elapsed = 0;
         }
-        const pts = node.state.points;
-        if (pts && pts.length >= 2) {
+        const st = node.state;
+        if (st.points.length >= 2 && st.total > 0) {
           node.elapsed += dt;
-          const dir = node.state.backwards ? -1 : 1;
-          let u = (node.state.startOffset + (dir * node.elapsed) / node.state.loopTime) % 1;
+          let progress = node.elapsed / st.loopTime;
+          if (st.maxLoops > 0 && progress >= st.maxLoops) {
+            progress = st.maxLoops;
+            node.done = true;
+          }
+          let travelled = progress;
+          if (st.pingPong) {
+            const m = progress % 2;
+            travelled = m > 1 ? 2 - m : m;
+          }
+          let u = (st.startOffset + st.dir * travelled) % 1;
           if (u < 0) u += 1;
-          const exact = u * pts.length;
-          const i0 = Math.floor(exact) % pts.length;
-          const i1 = (i0 + 1) % pts.length;
-          const frac = exact - Math.floor(exact);
-          this.brick.x = pts[i0].x + (pts[i1].x - pts[i0].x) * frac;
-          this.brick.y = pts[i0].y + (pts[i1].y - pts[i0].y) * frac;
+          const dist = u * st.total;
+          let seg = 1;
+          while (seg < st.cum.length - 1 && st.cum[seg] < dist) seg++;
+          const segLen = st.cum[seg] - st.cum[seg - 1] || 1;
+          const frac = Math.max(0, Math.min(1, (dist - st.cum[seg - 1]) / segLen));
+          this.brick.x = st.points[seg - 1].x + (st.points[seg].x - st.points[seg - 1].x) * frac;
+          this.brick.y = st.points[seg - 1].y + (st.points[seg].y - st.points[seg - 1].y) * frac;
         }
         break;
       }
@@ -603,7 +726,7 @@ class BrickPluginRunner {
       case 'CBrickPlugInWaitXSeconds': {
         if (!node.initialized) {
           node.initialized = true;
-          node.state.wait = Number(r['Time To Wait'] || r.Seconds || 0.5);
+          node.state.wait = this.evalNumber(r['Time To Wait'] ?? r.Seconds, 0.5);
           node.elapsed = 0;
         }
         node.elapsed += dt;
@@ -683,7 +806,7 @@ class RicochetEngine {
     this.score = 0;
     this.lives = 3;
     this.ringsInRound = 0;
-    this.totalRings = 125;
+    this.totalRings = 0;
     this.paused = false;
     this.time = 0;
 
@@ -738,6 +861,9 @@ class RicochetEngine {
     this.mouseDownRight = false;
     this.lastRecallSound = 0;
     this.roundClearTimer = 0;
+    this.roundHasTargets = false;
+    this.spaceLaunched = false;
+    this.renderToken = 0;
   }
 
   async init() {
@@ -824,26 +950,44 @@ class RicochetEngine {
 
     window.addEventListener('keydown', (e) => {
       if (e.target && e.target.tagName === 'INPUT') return;
+      if (this.isDialogOpen()) return;
       if (e.code === 'ArrowLeft' || e.code === 'KeyA') this.keys.left = true;
       if (e.code === 'ArrowRight' || e.code === 'KeyD') this.keys.right = true;
       if (e.code === 'Space') {
         e.preventDefault();
         this.hideBanner();
-        if (this.balls.some((b) => b.caught)) {
+        if (!e.repeat && this.balls.some((b) => b.caught)) {
           this.launchCaughtBalls();
-        } else {
+          // Holding Space after a launch must not immediately recall the ball.
+          this.spaceLaunched = true;
+        } else if (!this.spaceLaunched) {
           this.keys.recall = true;
         }
       }
-      if (e.code === 'BracketLeft') this.stepRound(-1);
-      if (e.code === 'BracketRight') this.stepRound(1);
-      if (e.code === 'KeyP') this.togglePause();
+      if (!e.repeat) {
+        if (e.code === 'BracketLeft') this.stepRound(-1);
+        if (e.code === 'BracketRight') this.stepRound(1);
+        if (e.code === 'KeyP') this.togglePause();
+      }
     });
 
     window.addEventListener('keyup', (e) => {
       if (e.code === 'ArrowLeft' || e.code === 'KeyA') this.keys.left = false;
       if (e.code === 'ArrowRight' || e.code === 'KeyD') this.keys.right = false;
-      if (e.code === 'Space') this.keys.recall = false;
+      if (e.code === 'Space') {
+        this.keys.recall = false;
+        this.spaceLaunched = false;
+      }
+    });
+
+    // Release held inputs when the window loses focus so keys/buttons never stick.
+    window.addEventListener('blur', () => {
+      this.keys.left = false;
+      this.keys.right = false;
+      this.keys.recall = false;
+      this.spaceLaunched = false;
+      this.mouseDownLeft = false;
+      this.mouseDownRight = false;
     });
 
     document.getElementById('btn-prev-round').addEventListener('click', () => this.stepRound(-1));
@@ -868,19 +1012,10 @@ class RicochetEngine {
         this.applyPowerup(puName);
       });
     });
+  }
 
-    // Listen for Invoker 'command' events directly on target <dialog> elements (does not bubble)
-    ['planets-dialog', 'hangar-dialog', 'inspector-dialog'].forEach((id) => {
-      const dlg = document.getElementById(id);
-      if (!dlg) return;
-      dlg.addEventListener('command', (e) => {
-        const cmd = e.command || (e.detail && e.detail.command);
-        if (cmd === 'show-modal') this.paused = true;
-      });
-      dlg.addEventListener('close', () => {
-        this.paused = false;
-      });
-    });
+  isDialogOpen() {
+    return document.querySelector('dialog[open]') !== null;
   }
 
   togglePause() {
@@ -1057,6 +1192,9 @@ class RicochetEngine {
       brick.runner = new BrickPluginRunner(brick, this);
       this.bricks.push(brick);
     }
+
+    // Showcase/menu patterns made only of indestructible bricks must not auto-skip as "cleared".
+    this.roundHasTargets = this.bricks.some((b) => !b.isMarker && !b.indestructible && !b.isCoin);
 
     this.ship.scale = 1.0;
     this.ship.hasGun = false;
@@ -1242,12 +1380,13 @@ class RicochetEngine {
       case 'Multiply 3 Inline':
       case 'Multiply 8': {
         const clones = [];
-        const count = puName === 'Multiply 8' ? 4 : 2;
+        const count = puName === 'Multiply 8' ? 7 : 2;
         for (const b of this.balls.slice(0, 4)) {
           if (b.caught) {
             b.caught = false;
-            b.vx = 120;
-            b.vy = -b.speed;
+            const launch = -Math.PI / 2 + 0.2;
+            b.vx = Math.cos(launch) * b.speed;
+            b.vy = Math.sin(launch) * b.speed;
           }
           for (let i = 0; i < count; i++) {
             const ang = Math.atan2(b.vy, b.vx) + (i - (count - 1) / 2) * 0.34;
@@ -1306,10 +1445,11 @@ class RicochetEngine {
   }
 
   loop(now) {
-    const dt = Math.min(0.033, (now - this.lastFrameTime) / 1000);
+    const dt = Math.max(0, Math.min(0.033, (now - this.lastFrameTime) / 1000));
     this.lastFrameTime = now;
 
-    if (!this.paused) {
+    // Any open modal dialog freezes the simulation without touching the user's own Pause toggle.
+    if (!this.paused && !this.isDialogOpen()) {
       this.time += dt;
       this.update(dt);
     }
@@ -1348,6 +1488,11 @@ class RicochetEngine {
         b.prevY = b.y;
         if (b.runner && (b.alive || b.isMarker)) {
           b.runner.update(dt);
+          // An unsupported script value must never poison a brick (and its mimic followers) with NaN.
+          if (!Number.isFinite(b.x) || !Number.isFinite(b.y)) {
+            b.x = b.prevX;
+            b.y = b.prevY;
+          }
         }
         b.frameDx = b.x - b.prevX;
         b.frameDy = b.y - b.prevY;
@@ -1505,12 +1650,12 @@ class RicochetEngine {
       }
 
       for (const b of this.bricks) {
-        if (!b.alive || b.hidden) continue;
+        if (!b.alive || b.hidden || b.isCoin) continue;
         if (
           Math.abs(p.x - b.x) <= b.w / 2 + 6 &&
           Math.abs(p.y - b.y) <= b.h / 2 + 6
         ) {
-          this.damageBrick(b, { piercing: p.kind === 'stinger' });
+          this.damageBrick(b, { piercing: p.kind === 'stinger' && !b.indestructible });
           this.projectiles.splice(pi, 1);
           break;
         }
@@ -1556,7 +1701,7 @@ class RicochetEngine {
     const remaining = this.bricks.filter(
       (b) => b.alive && !b.indestructible && !b.isCoin
     );
-    if (remaining.length === 0 && this.bricks.length > 0) {
+    if (this.roundHasTargets && remaining.length === 0) {
       this.roundClearTimer += dt;
       if (this.roundClearTimer > 1.1) {
         this.audio.playSound('Level Ending Tune');
@@ -1594,7 +1739,8 @@ class RicochetEngine {
           });
         }
 
-        if (b.class === 'CBrickSwitch') {
+        if (b.class === 'CBrickSwitch' && this.time - (b.lastSwitchAt ?? -1) > 0.3) {
+          b.lastSwitchAt = this.time;
           this.audio.playSound('Brick Turned Off');
           for (const other of this.bricks) {
             if (other.class === 'CBrickOnOff') other.hidden = !other.hidden;
@@ -1642,18 +1788,23 @@ class RicochetEngine {
     }
   }
 
+  effectDuration(spriteKey) {
+    return Math.min(1.5, Math.max(0.3, this.sprites.getDuration(spriteKey, 0.45)));
+  }
+
   collectCoin(brick) {
     brick.alive = false;
     this.ringsInRound++;
     this.totalRings++;
     this.score += 500;
     this.audio.playSound(brick.styleDef.pickupSound || 'Rings Earn Ball');
+    const pickupKey = brick.styleDef.pickupSeq || 'Effects/Ring Pickup';
     this.particles.push({
-      spriteKey: brick.styleDef.pickupSeq || 'Effects/Ring Pickup',
+      spriteKey: pickupKey,
       x: brick.x,
       y: brick.y,
       elapsed: 0,
-      duration: 0.45,
+      duration: this.effectDuration(pickupKey),
       additive: true,
     });
     if (this.ringsInRound >= 5) {
@@ -1694,7 +1845,7 @@ class RicochetEngine {
       x: brick.x,
       y: brick.y,
       elapsed: 0,
-      duration: 0.45,
+      duration: this.effectDuration(expKey),
       additive: true,
     });
 
@@ -1715,7 +1866,7 @@ class RicochetEngine {
       this.audio.playSound('Super Explode Brick');
       const radius = brick.isExploder ? 72 : 48;
       for (const other of this.bricks) {
-        if (!other.alive || other === brick) continue;
+        if (!other.alive || other === brick || other.indestructible || other.isCoin) continue;
         if (Math.hypot(other.x - brick.x, other.y - brick.y) <= radius) {
           this.particles.push({
             spriteKey: 'Effects/Mayan Explosion',
@@ -1723,7 +1874,7 @@ class RicochetEngine {
             y: other.y,
             elapsed: 0,
             delay: 0.06,
-            duration: 0.5,
+            duration: 0.06 + this.effectDuration('Effects/Mayan Explosion'),
             additive: true,
             onTrigger: () => this.damageBrick(other, { piercing: true }),
           });
@@ -1915,6 +2066,7 @@ class RicochetEngine {
         time: activeTime,
         additive: pt.additive,
         center: true,
+        once: true,
       });
     }
 
@@ -2020,7 +2172,8 @@ class RicochetEngine {
     ctx.strokeStyle = '#3ce8ff';
     ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.roundRect(652, 452, 128, 32, 6);
+    if (typeof ctx.roundRect === 'function') ctx.roundRect(652, 452, 128, 32, 6);
+    else ctx.rect(652, 452, 128, 32);
     ctx.fill();
     ctx.stroke();
 
@@ -2067,6 +2220,26 @@ class RicochetEngine {
     return slug.replace(/_/g, ' ');
   }
 
+  // Renders one frame of a sprite sheet into a small canvas (an <img> would show the whole strip).
+  createSpriteThumb(rawKey, frameIdx, alt) {
+    const meta = this.sprites.getMeta(rawKey);
+    if (!meta || !meta.url) return null;
+    const frames =
+      meta.frames && meta.frames.length
+        ? meta.frames
+        : [{ x: 0, y: 0, w: meta.sheetW, h: meta.sheetH }];
+    const f = frames[Math.max(0, Math.min(frames.length - 1, frameIdx))];
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, f.w);
+    canvas.height = Math.max(1, f.h);
+    canvas.setAttribute('role', 'img');
+    canvas.setAttribute('aria-label', alt || meta.key);
+    const img = new Image();
+    img.onload = () => canvas.getContext('2d').drawImage(img, f.x, f.y, f.w, f.h, 0, 0, f.w, f.h);
+    img.src = safeAssetUrl(meta.url);
+    return canvas;
+  }
+
   buildModals() {
     // 1. Planets & Level Packs Modal
     const tabs = document.querySelectorAll('.campaign-tabs .tab-btn');
@@ -2088,13 +2261,11 @@ class RicochetEngine {
 
       const preview = document.createElement('div');
       preview.className = 'hangar-preview';
-      const iconMeta = this.sprites.getMeta(ship.iconSequence) || this.sprites.getMeta(ship.sequence);
-      if (iconMeta) {
-        const img = document.createElement('img');
-        img.src = safeAssetUrl(iconMeta.url);
-        img.alt = ship.name;
-        preview.appendChild(img);
-      }
+      // Prefer the dedicated menu icon; otherwise show the un-banked (centre) frame of the in-game ship.
+      const thumb = this.sprites.getMeta(ship.iconSequence)
+        ? this.createSpriteThumb(ship.iconSequence, 0, ship.name)
+        : this.createSpriteThumb(ship.sequence, 10, ship.name);
+      if (thumb) preview.appendChild(thumb);
 
       const title = document.createElement('div');
       title.className = 'planet-card-title';
@@ -2119,13 +2290,8 @@ class RicochetEngine {
 
       const preview = document.createElement('div');
       preview.className = 'hangar-preview';
-      const meta = this.sprites.getMeta(b.key);
-      if (meta) {
-        const img = document.createElement('img');
-        img.src = safeAssetUrl(meta.url);
-        img.alt = b.name;
-        preview.appendChild(img);
-      }
+      const thumb = this.createSpriteThumb(b.key, 0, b.name);
+      if (thumb) preview.appendChild(thumb);
 
       const title = document.createElement('div');
       title.className = 'planet-card-title';
@@ -2148,7 +2314,7 @@ class RicochetEngine {
     // 3. Binary RE & Sprite Inspector Modal
     const searchInput = document.getElementById('sprite-search');
     const canonicalSprites = Object.entries(this.sprites.manifest)
-      .filter(([k, v]) => k === v.key)
+      .filter(([k, v]) => k === v.key && v.url)
       .map(([, v]) => v);
 
     const renderSpriteBrowser = (query = '') => {
@@ -2254,10 +2420,27 @@ class RicochetEngine {
 
   async renderRoundsListForPack(slug, displayTitle) {
     const panel = document.getElementById('rounds-list-panel');
-    panel.innerHTML = `<div class="section-heading">Loading ${displayTitle}...</div>`;
-    const pack = await this.loadPack(slug);
+    const token = ++this.renderToken;
+    const heading = (text) => {
+      const h = document.createElement('div');
+      h.className = 'section-heading';
+      h.textContent = text;
+      return h;
+    };
+    panel.replaceChildren(heading(`Loading ${displayTitle}...`));
+
+    let pack;
+    try {
+      pack = await this.loadPack(slug);
+    } catch (err) {
+      if (token === this.renderToken) panel.replaceChildren(heading(`Could not load ${displayTitle}.`));
+      return;
+    }
+    // A newer selection started while this pack was loading; drop the stale result.
+    if (token !== this.renderToken) return;
+
     const rounds = pack.rounds || [];
-    panel.innerHTML = `<div class="section-heading">${displayTitle} — Select Round (${rounds.length} Rounds)</div>`;
+    panel.replaceChildren(heading(`${displayTitle} — Select Round (${rounds.length} Rounds)`));
 
     const rGrid = document.createElement('div');
     rGrid.className = 'rounds-grid';
@@ -2268,10 +2451,15 @@ class RicochetEngine {
       btn.className =
         'round-btn' + (slug === this.currentPackSlug && idx === this.currentRoundIndex ? ' active' : '');
       const envShort = ((lvl.background || '').split('/').pop() || 'Arena').replace(/\.Background$/i, '');
-      btn.innerHTML = `
-        <span class="r-num">ROUND ${idx + 1} · ${envShort}</span>
-        <span class="r-name">${lvl.name || 'Round ' + (idx + 1)}</span>
-      `;
+
+      const num = document.createElement('span');
+      num.className = 'r-num';
+      num.textContent = `ROUND ${idx + 1} · ${envShort}`;
+      const name = document.createElement('span');
+      name.className = 'r-name';
+      name.textContent = lvl.name || `Round ${idx + 1}`;
+      btn.append(num, name);
+
       btn.addEventListener('click', async () => {
         await this.loadPackAndRound(slug, idx);
         const dlg = document.getElementById('planets-dialog');
